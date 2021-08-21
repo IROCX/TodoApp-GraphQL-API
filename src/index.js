@@ -3,17 +3,37 @@ import {
     gql
 } from 'apollo-server';
 import {
-    MongoClient
+    MongoClient,
+    ObjectId
+
 } from 'mongodb';
 import dotenv from 'dotenv'
 import bcrypt from 'bcryptjs'
+import jwt from 'jsonwebtoken'
 
 // env variables
 dotenv.config()
 const {
     DB_URI,
-    DB_NAME
+    DB_NAME,
+    SECRET
 } = process.env;
+
+const getToken = (user) => jwt.sign({ id: user._id }, SECRET, { expiresIn: 60 * 60 * 24 })
+const getUserFromToken = async(token, db) => {
+    if (!token) {
+        console.log(1)
+        return null
+    }
+    const { id } = jwt.verify(token, SECRET)
+    if (!id) {
+        console.log(2)
+        return null
+    }
+    const user = await db.collection("Users").findOne({ _id: ObjectId(id) })
+    return user
+}
+
 
 
 // Graphql typeDefs and resolvers
@@ -26,37 +46,35 @@ const resolvers = {
     Mutation: {
         signup: async(_, { input }, { db }) => {
             const hashedPassword = bcrypt.hashSync(input.password)
-            const user = {...input, password: hashedPassword }
-            await db.collection('Users').insertOne(user)
+            const newUser = {...input, password: hashedPassword }
+            await db.collection('Users').insertOne(newUser)
             return {
-                user,
-                token: 'token'
+                newUser,
+                token: getToken(newUser)
             }
         },
 
         signin: async(_, { input }, { db }) => {
             const user = await db.collection('Users').findOne({ email: input.email })
-            if (user) {
-                const isMatch = bcrypt.compareSync(input.password, user.password)
-                if (isMatch) {
-                    return {
-                        user,
-                        token: 'token'
-                    }
-                } else
-                    throw new Error("Invalid credentials")
-
-            } else
+            const isMatch = bcrypt.compareSync(input.password, user ? user.password : "")
+            if (user && isMatch)
+                return {
+                    user,
+                    token: getToken(user)
+                }
+            else
                 throw new Error("Invalid credentials")
 
         }
     },
 
+    // _id to id mapper for DB User record
     User: {
         id: ({ _id, id }) => _id || id
     }
 
-};
+
+}
 
 const typeDefs = gql `
 type User{
@@ -119,16 +137,17 @@ const serverStartup = async() => {
     const db = client.db(DB_NAME)
     db.collection("Users").createIndex({ "email": 1 }, { unique: true })
 
-
-    const dbContext = {
-        db,
-    }
-
     // create server object
     const server = new ApolloServer({
         typeDefs,
         resolvers,
-        context: dbContext
+        context: async({ req }) => {
+            const user = await getUserFromToken(req.headers.authorization, db)
+            return {
+                db,
+                user
+            }
+        }
     })
 
     //start server to listen for requests
